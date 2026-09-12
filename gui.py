@@ -586,6 +586,8 @@ class CompareApp(tk.Tk):
             widget.bind("<Button-5>", self._on_mousewheel)
         for widget in (self.left_text, self.right_text):
             widget.bind("<Configure>", self._on_diff_configure)
+            # Middle-click paste on Text can desync the two panes; ignore it.
+            widget.bind("<Button-2>", lambda _e: "break")
         self.overview.bind("<Configure>", lambda _e: self._draw_overview())
         self.overview.bind("<Button-1>", self._on_overview_click)
         self.overview.bind("<B1-Motion>", self._on_overview_click)
@@ -713,7 +715,7 @@ class CompareApp(tk.Tk):
 
         btn_ws = ttk.Checkbutton(
             inner,
-            text="空白",
+            text="忽略空白",
             variable=self.var_ignore_ws,
             command=self._on_ignore_ws_toggle,
             style="Footer.TCheckbutton",
@@ -722,7 +724,7 @@ class CompareApp(tk.Tk):
         _Tooltip(btn_ws, "忽略行内多余空白，并忽略空行增删")
         btn_comments = ttk.Checkbutton(
             inner,
-            text="注释",
+            text="忽略注释",
             variable=self.var_ignore_comments,
             command=self._on_ignore_comments_toggle,
             style="Footer.TCheckbutton",
@@ -731,7 +733,7 @@ class CompareApp(tk.Tk):
         _Tooltip(btn_comments, "忽略仅改注释内容的差异；新增/删除注释行仍显示")
         ttk.Checkbutton(
             inner,
-            text="换行",
+            text="自动换行",
             variable=self.var_wrap,
             command=self._on_wrap_toggle,
             style="Footer.TCheckbutton",
@@ -2034,8 +2036,6 @@ class CompareApp(tk.Tk):
             text.delete("1.0", tk.END)
 
         wrap = bool(self.var_wrap.get())
-        left_cols = self._wrap_cols(self.left_text) if wrap else 0
-        right_cols = self._wrap_cols(self.right_text) if wrap else 0
         ln_width = self._line_no_width(rows)
 
         left_parts: list[str] = []
@@ -2044,26 +2044,13 @@ class CompareApp(tk.Tk):
         right_tags: list[tuple[str, int, int]] = []
         left_pos = 0
         right_pos = 0
+        left_ranges: list[tuple[int, int]] = []
+        right_ranges: list[tuple[int, int]] = []
 
         for i, row in enumerate(rows):
-            left_pad = 0
-            right_pad = 0
-            if wrap:
-                left_blank = row.left is None or row.kind == "insert"
-                right_blank = row.right is None or row.kind == "delete"
-                left_h = self._estimate_wrap_lines(
-                    None if left_blank else row.left, left_cols, ln_width
-                )
-                right_h = self._estimate_wrap_lines(
-                    None if right_blank else row.right, right_cols, ln_width
-                )
-                if left_h > right_h:
-                    right_pad = left_h - right_h
-                elif right_h > left_h:
-                    left_pad = right_h - left_h
-
-            # Equal rows: plain text only (default fg). Tags only on changes —
-            # thousands of tag_add calls were freezing the UI.
+            # Skip len()-based wrap pads: they drift from Tk CHAR wrap and the
+            # two panes slowly fall out of alignment down the file.
+            left_start = left_pos
             left_pos = self._append_side(
                 left_parts,
                 left_tags,
@@ -2075,8 +2062,11 @@ class CompareApp(tk.Tk):
                 i,
                 row.left_no,
                 ln_width,
-                left_pad,
+                0,
             )
+            left_ranges.append((left_start, left_pos))
+
+            right_start = right_pos
             right_pos = self._append_side(
                 right_parts,
                 right_tags,
@@ -2088,16 +2078,53 @@ class CompareApp(tk.Tk):
                 i,
                 row.right_no,
                 ln_width,
-                right_pad,
+                0,
             )
+            right_ranges.append((right_start, right_pos))
 
         self.left_text.insert("1.0", "".join(left_parts))
         self.right_text.insert("1.0", "".join(right_parts))
         self._apply_tags(self.left_text, left_tags)
         self._apply_tags(self.right_text, right_tags)
 
+        if wrap:
+            self.update_idletasks()
+            self._balance_wrapped_rows(left_ranges, right_ranges)
+
         for text in (self.left_text, self.right_text):
             text.configure(state=tk.DISABLED)
+
+    def _display_line_count(self, widget: tk.Text, start: int, end: int) -> int:
+        if end <= start:
+            return 1
+        try:
+            counted = widget.count(f"1.0+{start}c", f"1.0+{end}c", "displaylines")
+            if isinstance(counted, tuple):
+                return max(1, int(counted[0] or 1))
+            if counted is None:
+                return 1
+            return max(1, int(counted))
+        except (tk.TclError, TypeError, ValueError):
+            return 1
+
+    def _balance_wrapped_rows(
+        self,
+        left_ranges: list[tuple[int, int]],
+        right_ranges: list[tuple[int, int]],
+    ) -> None:
+        """Insert pad newlines so each aligned row uses the same display height."""
+        n = min(len(left_ranges), len(right_ranges))
+        for i in range(n - 1, -1, -1):
+            ls, le = left_ranges[i]
+            rs, re = right_ranges[i]
+            ld = self._display_line_count(self.left_text, ls, le)
+            rd = self._display_line_count(self.right_text, rs, re)
+            if ld == rd:
+                continue
+            if ld > rd:
+                self.right_text.insert(f"1.0+{re}c", "\n" * (ld - rd))
+            else:
+                self.left_text.insert(f"1.0+{le}c", "\n" * (rd - ld))
 
     @staticmethod
     def _merge_tag_ranges(
@@ -2146,9 +2173,9 @@ class CompareApp(tk.Tk):
     def _estimate_wrap_lines(
         self, content: str | None, cols: int, ln_width: int = 4
     ) -> int:
+        # Legacy guess only; render uses measured displaylines instead.
         if content is None:
             return 1
-        # line-number prefix + space + body
         total = ln_width + 1 + len(content)
         return max(1, (total + cols - 1) // cols)
 

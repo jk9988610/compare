@@ -29,6 +29,7 @@ _encoding_backup/
 testdata_diff/
 _make_testdata.py
 _run_testdata.py
+_test_wrap_align.py
 _fix_bat_tmp.py
 
 # PyInstaller build outputs (keep compare.spec + build.bat)
