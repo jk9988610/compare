@@ -43,8 +43,14 @@ def compare_dirs(
     dir_b: Path,
     use_color: bool,
     ignore_whitespace: bool = False,
+    ignore_comments: bool = False,
 ) -> int:
-    result = compute_diff(dir_a, dir_b, ignore_whitespace=ignore_whitespace)
+    result = compute_diff(
+        dir_a,
+        dir_b,
+        ignore_whitespace=ignore_whitespace,
+        ignore_comments=ignore_comments,
+    )
     if result.error:
         print(f"错误: {result.error}", file=sys.stderr)
         return 2
@@ -84,7 +90,12 @@ def main() -> int:
     parser.add_argument(
         "--ignore-whitespace",
         action="store_true",
-        help="忽略空白差异（压缩空白后比较）",
+        help="忽略空白差异（压缩行内空白，并忽略空行增删）",
+    )
+    parser.add_argument(
+        "--ignore-comments",
+        action="store_true",
+        help="忽略注释差异（按扩展名启发式剥离注释后比较）",
     )
     args = parser.parse_args()
 
@@ -106,6 +117,7 @@ def main() -> int:
         args.dir_b,
         use_color,
         ignore_whitespace=args.ignore_whitespace,
+        ignore_comments=args.ignore_comments,
     )
 
 

@@ -5,11 +5,38 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
-from engine import KIND_LABEL, CompareResult, FileChange, align_lines, build_unified_report
+from engine import (
+    KIND_LABEL,
+    AlignedRow,
+    CompareResult,
+    FileChange,
+    align_lines,
+    build_encoding_report,
+    build_unified_report,
+)
 
 
-def export_unified_diff(result: CompareResult, path: Path) -> None:
-    path.write_text(build_unified_report(result), encoding="utf-8")
+def export_unified_diff(
+    result: CompareResult,
+    path: Path,
+    *,
+    ignore_whitespace: bool = False,
+    ignore_comments: bool = False,
+) -> None:
+    path.write_text(
+        build_unified_report(
+            result,
+            ignore_whitespace=ignore_whitespace,
+            ignore_comments=ignore_comments,
+        ),
+        encoding="utf-8",
+    )
+    report_path = path.with_name(path.stem + ".encoding_report.txt")
+    report_path.write_text(build_encoding_report(result), encoding="utf-8")
+
+
+def export_encoding_report(result: CompareResult, path: Path) -> None:
+    path.write_text(build_encoding_report(result), encoding="utf-8")
 
 
 def _span_html(text: str, spans: list[tuple[int, int]], mark_class: str) -> str:
@@ -37,17 +64,24 @@ def _rows_table(rows: list[AlignedRow]) -> str:
         right = "" if row.right is None else _span_html(row.right, row.right_spans, "inline-add")
         left_cell = "&nbsp;" if row.left is None else left
         right_cell = "&nbsp;" if row.right is None else right
+        ln_a = "" if row.left_no is None else str(row.left_no)
+        ln_b = "" if row.right_no is None else str(row.right_no)
         body.append(
             f'<tr class="{cls}" id="r{i}">'
-            f'<td class="ln">{i + 1}</td>'
+            f'<td class="ln">{ln_a}</td>'
             f'<td class="code left">{left_cell}</td>'
+            f'<td class="ln">{ln_b}</td>'
             f'<td class="code right">{right_cell}</td>'
             f"</tr>"
         )
     return "\n".join(body)
 
 
-def _file_section(change: FileChange, ignore_whitespace: bool) -> str:
+def _file_section(
+    change: FileChange,
+    ignore_whitespace: bool,
+    ignore_comments: bool,
+) -> str:
     label = KIND_LABEL[change.kind]
     if change.kind == "binary":
         note = html.escape("\n".join(change.diff_lines))
@@ -56,12 +90,25 @@ def _file_section(change: FileChange, ignore_whitespace: bool) -> str:
             f"<h2>{html.escape(label)} · {html.escape(change.rel)}</h2>"
             f'<pre class="note">{note}</pre></section>'
         )
-    rows = align_lines(change.lines_a, change.lines_b, ignore_whitespace)
+    if change.kind == "encoding" or change.encoding_only:
+        note = html.escape(change.encoding_note or "\n".join(change.diff_lines))
+        return (
+            f'<section class="file" id="{html.escape(change.rel)}">'
+            f"<h2>{html.escape(label)} · {html.escape(change.rel)}</h2>"
+            f'<pre class="note">{note}</pre></section>'
+        )
+    rows = align_lines(
+        change.lines_a,
+        change.lines_b,
+        ignore_whitespace=ignore_whitespace,
+        ignore_comments=ignore_comments,
+        rel=change.rel,
+    )
     return (
         f'<section class="file" id="{html.escape(change.rel)}">'
         f"<h2>{html.escape(label)} · {html.escape(change.rel)}</h2>"
         f'<table class="diff"><thead><tr>'
-        f'<th class="ln">#</th><th>A</th><th>B</th>'
+        f'<th class="ln">A#</th><th>A</th><th class="ln">B#</th><th>B</th>'
         f"</tr></thead><tbody>\n{_rows_table(rows)}\n</tbody></table></section>"
     )
 
@@ -73,15 +120,25 @@ def export_html_report(
     dir_a: str = "",
     dir_b: str = "",
     ignore_whitespace: bool = False,
+    ignore_comments: bool = False,
 ) -> None:
     nav = "\n".join(
         f'<li><a href="#{html.escape(c.rel)}">'
         f"{html.escape(KIND_LABEL[c.kind])} {html.escape(c.rel)}</a></li>"
         for c in result.changes
     )
-    sections = "\n".join(_file_section(c, ignore_whitespace) for c in result.changes)
+    sections = "\n".join(
+        _file_section(c, ignore_whitespace, ignore_comments) for c in result.changes
+    )
     if not result.changes:
         sections = "<p class='empty'>两个目录内容一致（在忽略规则下）。</p>"
+
+    flags = []
+    if ignore_whitespace:
+        flags.append("已忽略空白（含空行）")
+    if ignore_comments:
+        flags.append("已忽略纯注释改写（新增/删除注释行仍显示）")
+    flags_text = (" · " + " · ".join(flags)) if flags else ""
 
     doc = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -91,9 +148,9 @@ def export_html_report(
 <title>目录对比报告</title>
 <style>
 :root {{
-  --bg:#1a1f24; --panel:#22282f; --ink:#e6edf2; --muted:#8b9aa6;
-  --accent:#3d8fa0; --line:#3a4550; --add:#1c3324; --del:#3a2220;
-  --add-fg:#7dce8a; --del-fg:#e88b84;
+  --bg:#1a1f24; --panel:#22282f; --ink:#c9d1d9; --muted:#8b9aa6;
+  --accent:#3d8fa0; --line:#3a4550; --add:#12361f; --del:#4b1818;
+  --add-fg:#7ee787; --del-fg:#ffa198;
 }}
 * {{ box-sizing:border-box; }}
 body {{
@@ -132,7 +189,8 @@ td.ln {{ width:3rem; color:var(--muted); text-align:right; user-select:none; }}
 td.code {{ white-space:pre-wrap; word-break:break-word; width:50%; }}
 tr.delete td.left, tr.replace td.left {{ background:var(--del); color:var(--del-fg); }}
 tr.insert td.right, tr.replace td.right {{ background:var(--add); color:var(--add-fg); }}
-tr.delete td.right, tr.insert td.left {{ background:#161b20; color:#5a6670; }}
+tr.delete td.right, tr.insert td.left {{ background:transparent; color:#484f58; }}
+tr.equal td {{ background:transparent; }}
 mark.inline-del {{ background:#7a3030; color:#ffe4e1; padding:0 1px; }}
 mark.inline-add {{ background:#2f6b3a; color:#e6ffe9; padding:0 1px; }}
 .note {{ margin:0; padding:14px; color:var(--muted); }}
@@ -150,7 +208,7 @@ mark.inline-add {{ background:#2f6b3a; color:#e6ffe9; padding:0 1px; }}
     A: {html.escape(dir_a) or "—"}<br/>
     B: {html.escape(dir_b) or "—"}<br/>
     变更 {len(result.changes)} · 仅 A={result.only_a} · 仅 B={result.only_b} · 共同={result.common}
-    {" · 已忽略空白" if ignore_whitespace else ""}
+    {flags_text}
   </div>
 </header>
 <main>
@@ -166,9 +224,12 @@ mark.inline-add {{ background:#2f6b3a; color:#e6ffe9; padding:0 1px; }}
 </html>
 """
     path.write_text(doc, encoding="utf-8")
+    report_path = path.with_name(path.stem + ".encoding_report.txt")
+    report_path.write_text(build_encoding_report(result), encoding="utf-8")
 
 
 __all__ = [
     "export_unified_diff",
     "export_html_report",
+    "export_encoding_report",
 ]

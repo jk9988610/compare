@@ -1,7 +1,8 @@
 {
-  "dir_a": "E:/KC536TOCH04/SE71M_0023_KC536_20260911",
-  "dir_b": "C:/Users/123mc/Desktop/457_CH04/software/SE71M_0457_CH04_V4_20260829",
-  "auto_refresh": true,
+  "dir_a": "C:/Users/123mc/Desktop/457_CH04/software/SE71M_0457_CH04_V4_20260829",
+  "dir_b": "E:/KC536TOCH04/SE71M_0023_KC536_20260911",
   "ignore_whitespace": true,
-  "geometry": "1379x701+62+65"
+  "ignore_comments": true,
+  "word_wrap": true,
+  "geometry": "1536x793+0+215"
 }
