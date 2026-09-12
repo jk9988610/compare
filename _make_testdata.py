@@ -58,7 +58,7 @@ def main() -> None:
         "}\r\n",
         "utf-8",
     )
-    write(old / "config.ini", "\ufeffkey=value\r\nmode=legacy\r\n", "utf-8-sig")
+    write(old / "config.ini", "key=value\r\nmode=legacy\r\n", "utf-8-sig")
     write(old / "readme.txt", "# readme\nplain text\n", "utf-8")
     write(
         old / "src" / "legacy_dbg.c",

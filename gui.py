@@ -23,20 +23,21 @@ from engine import (
 from encodingutil import detect_and_decode
 from export import export_html_report, export_unified_diff
 from language import detect_language
+from cache import cache_fingerprint, load_compare_cache, save_compare_cache
 from settings import load_settings, save_settings
 
-# Cursor-like dark chrome
-BG = "#1e1e1e"
-PANEL = "#252526"
-TITLE_BG = "#323233"
-FOOTER_BG = "#252526"
-INK = "#cccccc"
-MUTED = "#858585"
-ACCENT = "#0078d4"
-LINE = "#3c3c3c"
-ENTRY = "#3c3c3c"
-DIFF_BG = "#1e1e1e"
-HOVER = "#3e3e42"
+# Deep dark chrome (less mid-gray wash)
+BG = "#0d0d0d"
+PANEL = "#121212"
+TITLE_BG = "#161616"
+FOOTER_BG = "#101010"
+INK = "#e6e6e6"
+MUTED = "#8a8a8a"
+ACCENT = "#0a84ff"
+LINE = "#2a2a2a"
+ENTRY = "#1a1a1a"
+DIFF_BG = "#0a0a0a"
+HOVER = "#252525"
 CLOSE_HOVER = "#e81123"
 
 
@@ -258,7 +259,7 @@ class _Tooltip:
             tip,
             text=self.text,
             justify=tk.LEFT,
-            background="#2d2d2d",
+            background="#1c1c1c",
             foreground=INK,
             relief=tk.SOLID,
             borderwidth=1,
@@ -371,7 +372,7 @@ class CompareApp(tk.Tk):
         a = self.var_a.get().strip()
         b = self.var_b.get().strip()
         if a and b and Path(a).is_dir() and Path(b).is_dir():
-            self.after(120, self._start_compare)
+            self.after(120, self._try_restore_or_compare)
 
     def _setup_style(self) -> None:
         style = ttk.Style(self)
@@ -420,7 +421,7 @@ class CompareApp(tk.Tk):
             lightcolor=LINE,
             darkcolor=LINE,
         )
-        style.map("TEntry", fieldbackground=[("focus", "#464647")])
+        style.map("TEntry", fieldbackground=[("focus", "#222222")])
         style.configure(
             "TCombobox",
             fieldbackground=ENTRY,
@@ -445,7 +446,7 @@ class CompareApp(tk.Tk):
         )
         style.map(
             "Accent.TButton",
-            background=[("active", "#1a86d9"), ("disabled", "#264f73")],
+            background=[("active", "#1a7aeb"), ("disabled", "#1a3048")],
             foreground=[("disabled", MUTED)],
         )
         style.configure(
@@ -456,7 +457,7 @@ class CompareApp(tk.Tk):
             foreground=INK,
             bordercolor=LINE,
         )
-        style.map("TButton", background=[("active", HOVER), ("pressed", "#2a2a2a")])
+        style.map("TButton", background=[("active", HOVER), ("pressed", "#141414")])
         style.configure("TCheckbutton", background=BG, foreground=INK, font=ui, focuscolor=BG)
         style.map("TCheckbutton", background=[("active", BG)])
         style.configure(
@@ -472,7 +473,7 @@ class CompareApp(tk.Tk):
         style.configure(
             "Treeview.Heading",
             font=ui,
-            background="#2d2d2d",
+            background="#1c1c1c",
             foreground=INK,
             bordercolor=LINE,
             relief="flat",
@@ -486,12 +487,20 @@ class CompareApp(tk.Tk):
         style.configure("TPanedwindow", background=BG)
         style.configure(
             "TScrollbar",
-            background="#2d2d2d",
+            background="#222222",
             troughcolor=BG,
             arrowcolor=INK,
             bordercolor=LINE,
         )
-        style.map("TScrollbar", background=[("active", LINE)])
+        style.map("TScrollbar", background=[("active", "#333333")])
+        style.configure(
+            "Footer.Horizontal.TProgressbar",
+            troughcolor="#1a1a1a",
+            background=ACCENT,
+            bordercolor=LINE,
+            lightcolor=ACCENT,
+            darkcolor=ACCENT,
+        )
 
     def _build(self) -> None:
         self.var_a = tk.StringVar()
@@ -562,7 +571,7 @@ class CompareApp(tk.Tk):
         self.overview = tk.Canvas(
             panes,
             width=12,
-            bg="#161b22",
+            bg="#0a0a0a",
             highlightthickness=0,
             borderwidth=0,
             cursor="sb_v_double_arrow",
@@ -660,7 +669,7 @@ class CompareApp(tk.Tk):
     ) -> tk.Button:
         if chrome:
             bg = ACCENT if accent else TITLE_BG
-            abg = "#1a86d9" if accent else HOVER
+            abg = "#1a7aeb" if accent else HOVER
             fg = "#ffffff" if accent else INK
             btn = tk.Button(
                 parent,
@@ -749,12 +758,21 @@ class CompareApp(tk.Tk):
         self.meta_enc = ttk.Label(inner, text="编码: —", style="Footer.TLabel")
         self.meta_enc.pack(side=tk.LEFT, padx=(12, 0))
 
+        self.progress = ttk.Progressbar(
+            inner,
+            style="Footer.Horizontal.TProgressbar",
+            mode="determinate",
+            length=160,
+            maximum=100,
+            value=0,
+        )
         self.status = ttk.Label(
             inner,
             text="点「旧侧 / 新侧」·「编码检查」可对当前两侧统一为 UTF-8 无 BOM+LF",
             style="Status.TLabel",
         )
         self.status.pack(side=tk.RIGHT, padx=(10, 0))
+        # Progress sits at far right when shown (packed after status with side=RIGHT).
 
     def _build_title_bar(self) -> None:
         bar = tk.Frame(self, bg=TITLE_BG, height=38)
@@ -1508,20 +1526,20 @@ class CompareApp(tk.Tk):
             state=tk.DISABLED,
             cursor="arrow",
         )
-        text.tag_configure("equal", foreground="#c9d1d9")
+        text.tag_configure("equal", foreground="#d8d8d8")
         # GitHub-like: red remove / green add. No bg on equal/empty — avoids a
         # gray strip bleeding onto the first line of each change hunk in Tk.
-        text.tag_configure("delete", foreground="#ffa198", background="#4b1818")
-        text.tag_configure("insert", foreground="#7ee787", background="#12361f")
-        text.tag_configure("replace", foreground="#c9d1d9")
-        text.tag_configure("empty", foreground="#484f58")
-        text.tag_configure("inline_del", background="#791f1f", foreground="#ffd7d5")
-        text.tag_configure("inline_add", background="#1b4b2a", foreground="#dcffe4")
+        text.tag_configure("delete", foreground="#ffa198", background="#3a1212")
+        text.tag_configure("insert", foreground="#7ee787", background="#0d2818")
+        text.tag_configure("replace", foreground="#d8d8d8")
+        text.tag_configure("empty", foreground="#3a3a3a")
+        text.tag_configure("inline_del", background="#5c1818", foreground="#ffd7d5")
+        text.tag_configure("inline_add", background="#144028", foreground="#dcffe4")
         # Current hunk: scroll only — no third accent color on gutters.
         text.tag_configure("meta", foreground=MUTED)
-        text.tag_configure("ln", foreground="#6e7681")
-        text.tag_configure("ln_del", foreground="#ffa198", background="#4b1818")
-        text.tag_configure("ln_add", foreground="#7ee787", background="#12361f")
+        text.tag_configure("ln", foreground="#5a5a5a")
+        text.tag_configure("ln_del", foreground="#ffa198", background="#3a1212")
+        text.tag_configure("ln_add", foreground="#7ee787", background="#0d2818")
         for name in (
             "delete",
             "insert",
@@ -1635,6 +1653,46 @@ class CompareApp(tk.Tk):
                 pass
         if status is not None:
             self.status.config(text=status)
+        if not busy:
+            self._hide_progress()
+
+    def _show_progress(self, current: int, total: int) -> None:
+        if total <= 0:
+            self._hide_progress()
+            return
+        try:
+            self.progress.configure(maximum=max(total, 1), value=max(0, min(current, total)))
+            if not self.progress.winfo_ismapped():
+                self.progress.pack(side=tk.RIGHT, before=self.status, padx=(8, 0))
+        except tk.TclError:
+            pass
+
+    def _hide_progress(self) -> None:
+        try:
+            self.progress.configure(value=0)
+            if self.progress.winfo_ismapped():
+                self.progress.pack_forget()
+        except tk.TclError:
+            pass
+
+    def _compare_fingerprint(self) -> dict:
+        return cache_fingerprint(
+            self.var_a.get().strip(),
+            self.var_b.get().strip(),
+            ignore_whitespace=bool(self.var_ignore_ws.get()),
+            ignore_comments=bool(self.var_ignore_comments.get()),
+            ignore_patterns=list(self._ignore_patterns),
+        )
+
+    def _try_restore_or_compare(self) -> None:
+        """Open last cached result if fingerprint matches; otherwise scan."""
+        cached = load_compare_cache(self._compare_fingerprint())
+        if cached is None:
+            self._start_compare()
+            return
+        result, selected = cached
+        self.status.config(text="正在从缓存恢复…")
+        self._apply_result(result, preserve_rel=selected or None, from_cache=True)
 
     def _on_compare(self) -> None:
         self._start_compare()
@@ -1651,6 +1709,7 @@ class CompareApp(tk.Tk):
         if preserve_rel is None:
             preserve_rel = self._selected_rel()
         self._set_busy(True, "正在扫描对比…")
+        self._show_progress(0, 1)
         ignore_ws = bool(self.var_ignore_ws.get())
         ignore_comments = bool(self.var_ignore_comments.get())
         extra = list(self._ignore_patterns)
@@ -1678,9 +1737,15 @@ class CompareApp(tk.Tk):
             if current < total and now - last_ui[0] < 0.05:
                 return
             last_ui[0] = now
-            short = rel if len(rel) <= 64 else "…" + rel[-63:]
-            text = f"正在扫描 {current}/{total}：{short}"
-            self.after(0, lambda t=text: self.status.config(text=t))
+            short = rel if len(rel) <= 48 else "…" + rel[-47:]
+            pct = int(100 * current / total) if total else 0
+            text = f"扫描 {current}/{total}（{pct}%）：{short}"
+
+            def tick(c=current, t=total, msg=text) -> None:
+                self._show_progress(c, t)
+                self.status.config(text=msg)
+
+            self.after(0, tick)
 
         try:
             result = compute_diff(
@@ -1699,6 +1764,8 @@ class CompareApp(tk.Tk):
         self,
         result: CompareResult,
         preserve_rel: str | None = None,
+        *,
+        from_cache: bool = False,
     ) -> None:
         self._set_busy(False)
         self._clear_diff()
@@ -1717,6 +1784,12 @@ class CompareApp(tk.Tk):
         self._all_changes = result.changes
         self._align_cache.clear()
         self._persist_prefs()
+        if not from_cache:
+            save_compare_cache(
+                self._compare_fingerprint(),
+                result,
+                selected_rel=preserve_rel,
+            )
 
         self._apply_filter(preserve_rel=preserve_rel)
 
@@ -1744,8 +1817,11 @@ class CompareApp(tk.Tk):
                 enc += f" · 已隐藏仅编码 {enc_only}"
             if eol_n:
                 enc += f"（EOL约{eol_n}）"
+        cache_note = " · 缓存" if from_cache else ""
         if not result.changes:
-            self.status.config(text=f"两个目录内容一致（在忽略规则下）{ws}{cm}{ig}")
+            self.status.config(
+                text=f"两个目录内容一致（在忽略规则下）{ws}{cm}{ig}{cache_note}"
+            )
         else:
             shown = len(
                 [
@@ -1759,9 +1835,13 @@ class CompareApp(tk.Tk):
                 text=(
                     f"变更 {shown}/{len(result.changes)} 个文件 · "
                     f"仅 A={result.only_a} · 仅 B={result.only_b} · 共同={result.common}"
-                    f"{ws}{cm}{ig}{enc}"
+                    f"{ws}{cm}{ig}{enc}{cache_note}"
                 )
             )
+        if from_cache:
+            tip = self.status.cget("text")
+            if "点「运行」可刷新" not in tip:
+                self.status.config(text=tip + " · 点「运行」可刷新")
 
     def _apply_filter(self, preserve_rel: str | None = None) -> None:
         if preserve_rel is None:
@@ -1840,7 +1920,14 @@ class CompareApp(tk.Tk):
             return
         idx = int(sel[0])
         if 0 <= idx < len(self._filtered):
-            self._show_change(self._filtered[idx])
+            change = self._filtered[idx]
+            self._show_change(change)
+            if self._last_result is not None:
+                save_compare_cache(
+                    self._compare_fingerprint(),
+                    self._last_result,
+                    selected_rel=change.rel,
+                )
 
     def _on_tree_menu(self, event) -> None:
         row = self.tree.identify_row(event.y)
@@ -2174,11 +2261,11 @@ class CompareApp(tk.Tk):
             y0 = int(i * h / n)
             y1 = max(y0 + 2, int(j * h / n))
             if kind == "delete":
-                fill = "#791f1f"
+                fill = "#5c1818"
             elif kind == "insert":
-                fill = "#1b4b2a"
+                fill = "#144028"
             else:
-                fill = "#6e5a1e"
+                fill = "#4a3d12"
             c.create_rectangle(1, y0, w - 1, y1, outline="", fill=fill, tags="mark")
             i = j
 

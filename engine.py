@@ -124,7 +124,7 @@ def load_gitignore(
     root: Path,
     extra_patterns: list[str] | None = None,
 ) -> pathspec.PathSpec:
-    patterns: list[str] = [".git/"]
+    patterns: list[str] = [".git/", "_encoding_backup/"]
     gi = root / ".gitignore"
     if gi.is_file():
         patterns.extend(gi.read_text(encoding="utf-8", errors="replace").splitlines())
