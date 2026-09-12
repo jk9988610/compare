@@ -1,0 +1,54 @@
+# Bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Local app settings (prefer %APPDATA%\目录对比\settings.json)
+settings.json
+*.local.json
+
+# Diff GUI last-compare cache
+last_compare.json
+last_compare.json.gz
+
+# Encoding unify backups
+_encoding_backup/
+
+# Local / generated test trees & helpers
+testdata_diff/
+_make_testdata.py
+_run_testdata.py
+_fix_bat_tmp.py
+
+# PyInstaller build outputs (keep compare.spec + build.bat)
+build/
+dist/
+*.pkg
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
+
+# Logs / temp / local exports
+*.log
+*.tmp
+*.bak
+*.diff
+*.encoding_report.txt

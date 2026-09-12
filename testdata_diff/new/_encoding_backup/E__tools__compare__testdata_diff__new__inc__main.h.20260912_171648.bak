@@ -1,9 +1,0 @@
-#ifndef MAIN_H
-#define MAIN_H
-
-// ÑÓÊ±½Ó¿Ú
-void sleep_ms(int ms);
-void init_board(void);
-void kick_watchdog(void);
-
-#endif
