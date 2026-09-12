@@ -9,6 +9,8 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -158,6 +160,17 @@ def rel_path_under_roots(path: Path, roots: list[Path]) -> str | None:
 
 FOLDER_ANY = "（任意目录）"
 TYPE_ALL = "（全部类型）"
+_RENDER_CACHE_MAX = 20
+
+
+@dataclass
+class _RenderSnapshot:
+    left: str
+    right: str
+    left_tags: list[tuple[str, int, int]]
+    right_tags: list[tuple[str, int, int]]
+    change_rows: list[int]
+    rows: list[AlignedRow]
 
 
 class SearchCombo(ttk.Frame):
@@ -293,6 +306,7 @@ class CompareApp(tk.Tk):
         self._syncing_scroll = False
         self._current_change: FileChange | None = None
         self._align_cache: dict[tuple[str, bool, bool], list[AlignedRow]] = {}
+        self._render_cache: OrderedDict[tuple, _RenderSnapshot] = OrderedDict()
         self._show_gen = 0
         self._wrap_resize_after: str | None = None
         self._last_diff_size: tuple[int, int] = (0, 0)
@@ -1578,16 +1592,19 @@ class CompareApp(tk.Tk):
             self._start_compare()
 
     def _on_ignore_ws_toggle(self) -> None:
+        self._render_cache.clear()
         self._persist_prefs()
         if self.var_a.get().strip() and self.var_b.get().strip():
             self._start_compare()
 
     def _on_ignore_comments_toggle(self) -> None:
+        self._render_cache.clear()
         self._persist_prefs()
         if self.var_a.get().strip() and self.var_b.get().strip():
             self._start_compare()
 
     def _on_wrap_toggle(self) -> None:
+        self._render_cache.clear()
         self._apply_wrap()
         self._persist_prefs()
         if self._current_change is not None:
@@ -1613,13 +1630,9 @@ class CompareApp(tk.Tk):
 
     def _rerender_for_wrap(self) -> None:
         self._wrap_resize_after = None
+        self._render_cache.clear()
         if self._current_change is not None and not self._busy:
-            preserve = self._selected_rel()
-            change = self._current_change
-            self._show_change(change)
-            if preserve:
-                # keep selection if still filtered the same
-                pass
+            self._show_change(self._current_change)
 
     def _apply_wrap(self) -> None:
         mode = tk.CHAR if self.var_wrap.get() else tk.NONE
@@ -1785,6 +1798,7 @@ class CompareApp(tk.Tk):
         self._last_result = result
         self._all_changes = result.changes
         self._align_cache.clear()
+        self._render_cache.clear()
         self._persist_prefs()
         if not from_cache:
             save_compare_cache(
@@ -1969,10 +1983,19 @@ class CompareApp(tk.Tk):
 
         ignore_ws = bool(self.var_ignore_ws.get())
         ignore_comments = bool(self.var_ignore_comments.get())
+        rkey = self._render_cache_key(change)
+        snap = self._render_cache.get(rkey)
+        if snap is not None:
+            self._render_cache.move_to_end(rkey)
+            self._apply_snapshot(change, snap, gen)
+            self._prefetch_neighbors(change)
+            return
+
         cache_key = (change.rel, ignore_ws, ignore_comments)
         rows = self._align_cache.get(cache_key)
         if rows is not None:
             self._apply_aligned(change, rows, gen)
+            self._prefetch_neighbors(change)
             return
 
         self.status.config(text=f"正在对齐: {change.rel} …")
@@ -2000,6 +2023,80 @@ class CompareApp(tk.Tk):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _prefetch_neighbors(self, change: FileChange) -> None:
+        """Warm align+render cache for adjacent list items (background)."""
+        try:
+            idx = self._filtered.index(change)
+        except ValueError:
+            return
+        neighbors = []
+        if idx > 0:
+            neighbors.append(self._filtered[idx - 1])
+        if idx + 1 < len(self._filtered):
+            neighbors.append(self._filtered[idx + 1])
+        ignore_ws = bool(self.var_ignore_ws.get())
+        ignore_comments = bool(self.var_ignore_comments.get())
+        wrap = bool(self.var_wrap.get())
+        lw = max(self.left_text.winfo_width(), 80)
+        rw = max(self.right_text.winfo_width(), 80)
+
+        def warm(c: FileChange) -> None:
+            if c.kind in {"binary", "encoding"} or c.encoding_only:
+                return
+            akey = (c.rel, ignore_ws, ignore_comments)
+            rows = self._align_cache.get(akey)
+            if rows is None:
+                try:
+                    rows = align_lines(
+                        list(c.lines_a),
+                        list(c.lines_b),
+                        ignore_whitespace=ignore_ws,
+                        ignore_comments=ignore_comments,
+                        rel=c.rel,
+                    )
+                except Exception:
+                    return
+                self._align_cache[akey] = rows
+            rkey = (c.rel, ignore_ws, ignore_comments, wrap, lw, rw)
+            if rkey in self._render_cache:
+                return
+            snap = self._build_snapshot(
+                rows,
+                wrap=wrap,
+                left_cols=self._cols_for_width(lw),
+                right_cols=self._cols_for_width(rw),
+            )
+
+            def store(s=snap, k=rkey) -> None:
+                self._store_render(k, s)
+
+            self.after(0, store)
+
+        for n in neighbors:
+            if self._render_cache_key(n) in self._render_cache:
+                continue
+            threading.Thread(target=warm, args=(n,), daemon=True).start()
+
+    def _render_cache_key(self, change: FileChange) -> tuple:
+        return (
+            change.rel,
+            bool(self.var_ignore_ws.get()),
+            bool(self.var_ignore_comments.get()),
+            bool(self.var_wrap.get()),
+            max(self.left_text.winfo_width(), 80),
+            max(self.right_text.winfo_width(), 80),
+        )
+
+    def _store_render(self, key: tuple, snap: _RenderSnapshot) -> None:
+        self._render_cache[key] = snap
+        self._render_cache.move_to_end(key)
+        while len(self._render_cache) > _RENDER_CACHE_MAX:
+            self._render_cache.popitem(last=False)
+
+    def _cols_for_width(self, width: int) -> int:
+        inner = max(40, width - 20)
+        return max(16, inner // max(self._mono_px, 1))
+
     def _align_failed(self, gen: int, rel: str, message: str) -> None:
         if gen != self._show_gen:
             return
@@ -2012,10 +2109,33 @@ class CompareApp(tk.Tk):
         cache_key: tuple[str, bool, bool],
         rows: list[AlignedRow],
     ) -> None:
+        self._align_cache[cache_key] = rows
         if gen != self._show_gen:
             return
-        self._align_cache[cache_key] = rows
         self._apply_aligned(change, rows, gen)
+        self._prefetch_neighbors(change)
+
+    def _apply_snapshot(self, change: FileChange, snap: _RenderSnapshot, gen: int) -> None:
+        if gen != self._show_gen or self._current_change is not change:
+            return
+        self._aligned = snap.rows
+        self._change_rows = list(snap.change_rows)
+        self._change_cursor = 0 if self._change_rows else -1
+        for text, body, tags in (
+            (self.left_text, snap.left, snap.left_tags),
+            (self.right_text, snap.right, snap.right_tags),
+        ):
+            text.configure(state=tk.NORMAL)
+            text.delete("1.0", tk.END)
+            text.insert("1.0", body)
+            self._apply_tags(text, tags)
+            text.configure(state=tk.DISABLED)
+        self._draw_overview()
+        if self._change_rows:
+            self._goto_change(0, absolute=True)
+        self.status.config(
+            text=f"{change.rel} · {len(snap.rows)} 行 · {len(self._change_rows)} 处差异 · 缓存"
+        )
 
     def _apply_aligned(self, change: FileChange, rows: list[AlignedRow], gen: int) -> None:
         if gen != self._show_gen or self._current_change is not change:
@@ -2023,34 +2143,48 @@ class CompareApp(tk.Tk):
         self._aligned = rows
         self._change_rows = change_row_indices(rows)
         self._change_cursor = 0 if self._change_rows else -1
-        self._render_side_by_side(rows)
+        snap = self._render_side_by_side(rows)
+        if snap is not None:
+            self._store_render(self._render_cache_key(change), snap)
         self._draw_overview()
         if self._change_rows:
             self._goto_change(0, absolute=True)
         n = len(self._change_rows)
         self.status.config(text=f"{change.rel} · {len(rows)} 行 · {n} 处差异")
 
-    def _render_side_by_side(self, rows: list[AlignedRow]) -> None:
-        for text in (self.left_text, self.right_text):
-            text.configure(state=tk.NORMAL)
-            text.delete("1.0", tk.END)
-
-        wrap = bool(self.var_wrap.get())
+    def _build_snapshot(
+        self,
+        rows: list[AlignedRow],
+        *,
+        wrap: bool,
+        left_cols: int,
+        right_cols: int,
+    ) -> _RenderSnapshot:
         ln_width = self._line_no_width(rows)
-
         left_parts: list[str] = []
         right_parts: list[str] = []
         left_tags: list[tuple[str, int, int]] = []
         right_tags: list[tuple[str, int, int]] = []
         left_pos = 0
         right_pos = 0
-        left_ranges: list[tuple[int, int]] = []
-        right_ranges: list[tuple[int, int]] = []
 
         for i, row in enumerate(rows):
-            # Skip len()-based wrap pads: they drift from Tk CHAR wrap and the
-            # two panes slowly fall out of alignment down the file.
-            left_start = left_pos
+            left_pad = 0
+            right_pad = 0
+            if wrap:
+                left_blank = row.left is None or row.kind == "insert"
+                right_blank = row.right is None or row.kind == "delete"
+                left_h = self._estimate_wrap_lines(
+                    None if left_blank else row.left, left_cols, ln_width
+                )
+                right_h = self._estimate_wrap_lines(
+                    None if right_blank else row.right, right_cols, ln_width
+                )
+                if left_h > right_h:
+                    right_pad = left_h - right_h
+                elif right_h > left_h:
+                    left_pad = right_h - left_h
+
             left_pos = self._append_side(
                 left_parts,
                 left_tags,
@@ -2062,11 +2196,8 @@ class CompareApp(tk.Tk):
                 i,
                 row.left_no,
                 ln_width,
-                0,
+                left_pad,
             )
-            left_ranges.append((left_start, left_pos))
-
-            right_start = right_pos
             right_pos = self._append_side(
                 right_parts,
                 right_tags,
@@ -2078,53 +2209,36 @@ class CompareApp(tk.Tk):
                 i,
                 row.right_no,
                 ln_width,
-                0,
+                right_pad,
             )
-            right_ranges.append((right_start, right_pos))
 
-        self.left_text.insert("1.0", "".join(left_parts))
-        self.right_text.insert("1.0", "".join(right_parts))
-        self._apply_tags(self.left_text, left_tags)
-        self._apply_tags(self.right_text, right_tags)
+        return _RenderSnapshot(
+            left="".join(left_parts),
+            right="".join(right_parts),
+            left_tags=left_tags,
+            right_tags=right_tags,
+            change_rows=change_row_indices(rows),
+            rows=rows,
+        )
 
-        if wrap:
-            self.update_idletasks()
-            self._balance_wrapped_rows(left_ranges, right_ranges)
+    def _render_side_by_side(self, rows: list[AlignedRow]) -> _RenderSnapshot | None:
+        for text in (self.left_text, self.right_text):
+            text.configure(state=tk.NORMAL)
+            text.delete("1.0", tk.END)
 
+        wrap = bool(self.var_wrap.get())
+        left_cols = self._wrap_cols(self.left_text) if wrap else 0
+        right_cols = self._wrap_cols(self.right_text) if wrap else 0
+        snap = self._build_snapshot(
+            rows, wrap=wrap, left_cols=left_cols, right_cols=right_cols
+        )
+        self.left_text.insert("1.0", snap.left)
+        self.right_text.insert("1.0", snap.right)
+        self._apply_tags(self.left_text, snap.left_tags)
+        self._apply_tags(self.right_text, snap.right_tags)
         for text in (self.left_text, self.right_text):
             text.configure(state=tk.DISABLED)
-
-    def _display_line_count(self, widget: tk.Text, start: int, end: int) -> int:
-        if end <= start:
-            return 1
-        try:
-            counted = widget.count(f"1.0+{start}c", f"1.0+{end}c", "displaylines")
-            if isinstance(counted, tuple):
-                return max(1, int(counted[0] or 1))
-            if counted is None:
-                return 1
-            return max(1, int(counted))
-        except (tk.TclError, TypeError, ValueError):
-            return 1
-
-    def _balance_wrapped_rows(
-        self,
-        left_ranges: list[tuple[int, int]],
-        right_ranges: list[tuple[int, int]],
-    ) -> None:
-        """Insert pad newlines so each aligned row uses the same display height."""
-        n = min(len(left_ranges), len(right_ranges))
-        for i in range(n - 1, -1, -1):
-            ls, le = left_ranges[i]
-            rs, re = right_ranges[i]
-            ld = self._display_line_count(self.left_text, ls, le)
-            rd = self._display_line_count(self.right_text, rs, re)
-            if ld == rd:
-                continue
-            if ld > rd:
-                self.right_text.insert(f"1.0+{re}c", "\n" * (ld - rd))
-            else:
-                self.left_text.insert(f"1.0+{le}c", "\n" * (rd - ld))
+        return snap
 
     @staticmethod
     def _merge_tag_ranges(
@@ -2158,7 +2272,7 @@ class CompareApp(tk.Tk):
 
     def _wrap_cols(self, widget: tk.Text) -> int:
         width = max(widget.winfo_width(), 80)
-        return max(16, (width - 20) // max(self._mono_px, 1))
+        return self._cols_for_width(width)
 
     @staticmethod
     def _line_no_width(rows: list[AlignedRow]) -> int:
@@ -2173,8 +2287,9 @@ class CompareApp(tk.Tk):
     def _estimate_wrap_lines(
         self, content: str | None, cols: int, ln_width: int = 4
     ) -> int:
-        # Legacy guess only; render uses measured displaylines instead.
         if content is None:
+            return 1
+        if cols <= 0:
             return 1
         total = ln_width + 1 + len(content)
         return max(1, (total + cols - 1) // cols)
